@@ -50,7 +50,7 @@ fn main() {
     let total_pixel = num_row * num_col;
     let mask = read_hdf5mask(mask_file);
     let mut beam_vec = vec![sx,sy,sz];
-    let mut pix_map:Vec<i32> = std::iter::repeat(-1).take(total_pixel.try_into().unwrap()).collect::<Vec<_>>();
+    let mut pix_map:Vec<i32> = vec![-1;total_pixel as usize];
     let mut norm = 0.0;
     for i in &beam_vec {
         norm += i * i;

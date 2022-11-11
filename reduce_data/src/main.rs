@@ -11,6 +11,26 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::Instant;
 pub mod config;
+
+/*
+reduce data and balance the work loads between processors 
+
+usage:
+reduce_data [config file]
+
+needs:
+config_file, quat_file, cbflist_file, radiallist_file, orienlist_file,
+peaklist_file, 
+num_prob_orien.dat (in data_dir),
+individual ave_bg, peak, orien files (in radial_bg and outlier dirs),
+raw data files (in raw_data dir)
+
+makes:
+prob_orien_file, mpi_bgfile, reduced_cbflist_file, reduced_radiallist_file,
+reduced_peaklist_file, reduced_data_id_file (usually in data_dir)
+
+*/
+
 fn main() -> Result<(), Box<dyn Error>> {
     let t1 = Instant::now();
 
@@ -224,7 +244,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut fp = File::create(reduced_cbflist_file)?;
         for d in 0..num_data as usize {
             let idx = load_balanced_data_id[d];
-            writeln!(fp, "{:?}", cbf_files[idx as usize])?;
+            writeln!(fp, "{}", cbf_files[idx as usize])?;
         }
     }
     {
@@ -232,7 +252,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut fp = File::create(reduced_radiallist_file)?;
         for d in 0..num_data as usize {
             let idx = load_balanced_data_id[d];
-            writeln!(fp, "{:?}", radialfiles[idx as usize])?;
+            writeln!(fp, "{}", radialfiles[idx as usize])?;
         }
     }
     {
@@ -240,7 +260,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut fp = File::create(reduced_peaklist_file)?;
         for d in 0..num_data as usize {
             let idx = load_balanced_data_id[d];
-            writeln!(fp, "{:?}", peak_files[idx as usize])?;
+            writeln!(fp, "{}", peak_files[idx as usize])?;
         }
     }
     {
@@ -264,7 +284,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut fp = File::create(reduced_data_id_file)?;
         writeln!(fp, "{num_data}")?;
         for d in 0..num_data as usize {
-            writeln!(fp, "{:?}", load_balanced_data_id[d])?;
+            writeln!(fp, "{}", load_balanced_data_id[d])?;
         }
     }
 
@@ -274,8 +294,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// sort vectors <i>A</i> and <i>B</i> by vector <i>A</i>
 fn merge_sort(a: Vec<i32>, b: Vec<i32>) -> (Vec<i32>, Vec<i32>) {
-    // sort vectors a and b by vector a
     let mut zipped = a
         .clone()
         .into_iter()

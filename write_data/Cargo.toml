@@ -1,0 +1,12 @@
+[package]
+name = "write_data"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+configparser = "3.0.1"
+hdf5 = "0.8.1"
+ndarray = "0.15.6"
+cryiorust = "0.6.0"
