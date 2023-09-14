@@ -1,6 +1,7 @@
 use crate::config::configure::Config;
 use clap::Parser;
 use hdf5::File as H5File;
+use indicatif::ProgressBar;
 use make_Emat::{Args, Pix};
 use ndarray::Array1;
 use rayon::iter;
@@ -18,8 +19,8 @@ use std::io::Write;
 use std::ops::Range;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
-use std::sync::{Arc,Mutex};
 
 pub mod config;
 const MEM_STEP_SIZE: i32 = 10000;
@@ -28,6 +29,7 @@ const ROOT: i32 = 0;
 #[derive(Clone, Copy, Debug)]
 pub struct Quat(f64, f64, f64, f64, f64);
 
+#[derive(Clone, Copy, Debug)]
 struct _box {
     row_min: i32,
     row_max: i32,
@@ -132,6 +134,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             pix
         };
         let num_pix = pix.len();
+        // let pix = Arc::new(pix);
         (qmax, qmin, num_pix, pix)
     };
 
@@ -148,6 +151,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .into())
         }
     };
+    let rec2pix_map = Arc::new(rec2pix_map);
     let total_pix: usize = (config.num_row * config.num_col) as usize;
     let pixmap_path = Path::new(&config.pixmap_file);
     let pix_map: Vec<i32> = match pixmap_path.extension().and_then(OsStr::to_str) {
@@ -466,9 +470,11 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         }
     }
+    // let hkl_map = Arc::new(hkl_map);
 
     println!("hmax = {hmax}, kmax = {kmax}, lmax = {lmax}, num_hkl = {num_hkl}");
     let mut if_skip_r: Vec<bool> = vec![true; num_rot as usize];
+    let mut num_rel_rotations = 0;
 
     if if_low {
         let num_data: i32 = {
@@ -500,43 +506,77 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
             }
         }
-        let mut num = 0;
         for r in 0..num_rot as usize {
             if !if_skip_r[r] {
-                num += 1;
+                num_rel_rotations += 1;
             }
         }
         println!("number of rotations = {num_rot}");
-        println!("number of relevant rotations = {num}");
+        println!("number of relevant rotations = {num_rel_rotations}");
     }
     let t2 = t1.elapsed();
-    let mut r2peak: Vec<Vec<i32>> = vec![Vec::default(); num_rot as usize];
+    let mut r2peak: Vec<Vec<i32>> = vec![vec![0]; num_rot as usize];
     let mut cur_r2peak: Vec<i32> = vec![0; num_hkl];
     let mut num_r2peak: Vec<i32> = vec![0; num_rot as usize];
     let mut num_peak2r: Vec<i32> = vec![0; num_rot as usize];
-    let mut peak_r: Vec<_box> = Vec::with_capacity(num_hkl);
-    let mut if_visit: Vec<bool> = vec![false; num_hkl];
+    let mut peak_r: Vec<_box> = vec![
+        _box {
+            row_min: 0,
+            row_max: 0,
+            col_min: 0,
+            col_max: 0
+        };
+        num_hkl
+    ];
 
+    let r2peak_ex: Arc<Mutex<Vec<Vec<i32>>>> = Arc::new(Mutex::new(r2peak));
+    let cur_r2peak_ex: Arc<RwLock<Vec<i32>>> = Arc::new(RwLock::new(cur_r2peak));
+    let num_r2peak_ex: Arc<Mutex<Vec<i32>>> = Arc::new(Mutex::new(num_r2peak));
+    let num_peak2r_ex: Arc<Mutex<Vec<i32>>> = Arc::new(Mutex::new(num_peak2r));
+    let peak_r_ex: Arc<RwLock<Vec<_box>>> = Arc::new(RwLock::new(peak_r));
+
+    let range = if_skip_r.iter().enumerate().filter(|(_, &r)| r == false).map(|(index, _)| index).collect::<Vec<_>>();
     println!("Setup takes: {:?}", t2);
     /* end setup section */
-
+    let bar = ProgressBar::new(range.len() as u64);
     /* start make_EMat section */
-
+    range.into_par_iter().for_each(|r| {
+            make_Emat(
+                r.try_into().unwrap(),
+                &quat,
+                klen,
+                llen,
+                hmax,
+                kmax,
+                lmax,
+                num_rot as i32,
+                num_pix as i32,
+                config.num_col,
+                num_hkl,
+                // Arc::clone(&pix),
+                &pix,
+                proj,
+                &hkl_map,
+                rlatt_vec,
+                tol,
+                Arc::clone(&rec2pix_map),
+                Arc::clone(&r2peak_ex),
+                Arc::clone(&cur_r2peak_ex),
+                Arc::clone(&num_r2peak_ex),
+                Arc::clone(&num_peak2r_ex),
+                Arc::clone(&peak_r_ex),
+            )
+            .unwrap();
+        
+        bar.inc(1);
+    });
+    bar.finish();
+    println!("Total time: {:?}",t1.elapsed());
     Ok(())
-}
-
-struct EMatResults {
-    r2peak: Vec<Vec<i32>>,
-    cur_r2peak: Vec<i32>,
-    num_r2peak: Vec<i32>,
-    num_peak2r: Vec<i32>,
-    peak_r: Vec<_box>,
-    if_visit: Vec<bool>,
 }
 
 fn make_Emat(
     r: usize,
-    config: Config,
     quat: &Vec<Quat>,
     klen: i32,
     llen: i32,
@@ -546,20 +586,26 @@ fn make_Emat(
     num_rot: i32,
     num_pix: i32,
     num_col: i32,
-    pix: Vec<Pix>,
+    num_hkl: usize,
+    pix: &Vec<Pix>,
     proj: [[f64; 3]; 3],
-    hkl_map: Vec<i32>,
+    hkl_map: &Vec<i32>,
     rlatt_vec: [[f64; 3]; 3],
     tol: f64,
-    rec2pix_map: Vec<i32>,
-    if_skip_r: Vec<bool>,
-    ) -> Result<(), Box<dyn Error>> {
+    rec2pix_map: Arc<Vec<i32>>,
+    r2peak: Arc<Mutex<Vec<Vec<i32>>>>,
+    cur_r2peak: Arc<RwLock<Vec<i32>>>,
+    num_r2peak: Arc<Mutex<Vec<i32>>>,
+    num_peak2r: Arc<Mutex<Vec<i32>>>,
+    peak_r: Arc<RwLock<Vec<_box>>>,
+) -> Result<(), Box<dyn Error>> {
     let (mut rmin, mut rmax, mut peak_ct): (i32, i32, i32);
     let (klen_llen, mut hkl_id): (i32, usize);
     let (mut idx, mut row_id, mut col_id, mut length): (i32, i32, i32, i32);
     let mut rot_pix: [f64; 3] = [0_f64; 3];
     let mut coefft: [f64; 3] = [0_f64; 3];
-    let mut alloc_r2p;
+    // let mut alloc_r2p;
+    let mut if_visit: Vec<bool> = vec![false; num_hkl];
 
     let load_id: i32 = 1;
 
@@ -575,116 +621,124 @@ fn make_Emat(
     // };
 
     // load2rank[load_id] = myid;
-    // println!("myid= {myid}, load_id={load_id},(rmin,rmax) = ({rmin},{rmax}");
-    alloc_r2p = 0;
+    // alloc_r2p = 0;
     // let rmin = 0;
     // let rmax = num_rot;
 
-        let rot = make_rot(r as usize, quat);
-        peak_ct = 0;
-        if if_skip_r[r] {
-            num_r2peak[r] = peak_ct;
-            r2peak[r] = vec![0; (1 + 3 * peak_ct) as usize];
-            alloc_r2p += 1 + 3 * peak_ct;
-            r2peak[r][0] = peak_ct;
+    let rot = make_rot(r as usize, quat);
+    peak_ct = 0;
+    for t in 0..num_pix as usize {
+        for i in 0..3 {
+            rot_pix[i] = rot[i][0] * pix[t].0;
+            rot_pix[i] += rot[i][1] * pix[t].1;
+            rot_pix[i] += rot[i][2] * pix[t].2;
+        }
+        for i in 0..3 {
+            coefft[i] = proj[i][0] * rot_pix[0];
+            for j in 1..3 {
+                coefft[i] += proj[i][j] * rot_pix[j];
+            }
+        }
+
+        let hval = coefft[0].round() as i32;
+        if hval.abs() > hmax {
             continue;
         }
-        for t in 0..num_pix as usize {
-            for i in 0..3 {
-                rot_pix[i] = rot[i][0] * pix[t].0;
-                rot_pix[i] += rot[i][1] * pix[t].1;
-                rot_pix[i] += rot[i][2] * pix[t].2;
-            }
-            for i in 0..3 {
-                coefft[i] = proj[i][0] * rot_pix[0];
-                for j in 1..3 {
-                    coefft[i] += proj[i][j] * rot_pix[j];
-                }
-            }
-
-            let hval = coefft[0].round() as i32;
-            if hval.abs() > hmax {
-                continue;
-            }
-            let kval = coefft[1].round() as i32;
-            if kval.abs() > kmax {
-                continue;
-            }
-            let lval = coefft[2].round() as i32;
-            if lval.abs() > lmax {
-                continue;
-            }
-
-            idx = (hval + hmax) * klen_llen + (kval + kmax) * llen + (lval + lmax);
-            hkl_id = hkl_map[idx as usize] as usize;
-            if hkl_id < 0 {
-                continue;
-            }
-
-            let dx = rot_pix[0]
-                - (hval as f64) * rlatt_vec[0][0]
-                - (kval as f64) * rlatt_vec[0][1]
-                - (lval as f64) * rlatt_vec[0][2];
-            let dy = rot_pix[1]
-                - (hval as f64) * rlatt_vec[1][0]
-                - (kval as f64) * rlatt_vec[1][1]
-                - (lval as f64) * rlatt_vec[1][2];
-            let dz = rot_pix[2]
-                - (hval as f64) * rlatt_vec[2][0]
-                - (kval as f64) * rlatt_vec[2][1]
-                - (lval as f64) * rlatt_vec[2][2];
-
-            /* rot_pix is out of the view of its closet Bragg peak */
-            if dx * dx + dy * dy + dz * dz > tol {
-                continue;
-            }
-
-            row_id = rec2pix_map[t] / num_col;
-            col_id = rec2pix_map[t] % num_col;
-
-            if if_visit[hkl_id] == false {
-                cur_r2peak[peak_ct as usize] = hkl_id as i32;
-                peak_ct += 1;
-                peak_r[hkl_id].row_min = row_id;
-                peak_r[hkl_id].row_max = row_id;
-                peak_r[hkl_id].col_min = col_id;
-                peak_r[hkl_id].col_max = col_id;
-                if_visit[hkl_id] = true;
-            } else {
-                if (peak_r[hkl_id].row_min > row_id) {
-                    peak_r[hkl_id].row_min = row_id;
-                }
-                if (peak_r[hkl_id].row_max < row_id) {
-                    peak_r[hkl_id].row_max = row_id;
-                }
-                if (peak_r[hkl_id].col_min > col_id) {
-                    peak_r[hkl_id].col_min = col_id;
-                }
-                if (peak_r[hkl_id].col_max < col_id) {
-                    peak_r[hkl_id].col_max = col_id;
-                }
-            }
+        let kval = coefft[1].round() as i32;
+        if kval.abs() > kmax {
+            continue;
+        }
+        let lval = coefft[2].round() as i32;
+        if lval.abs() > lmax {
+            continue;
         }
 
-        for t in 0..peak_ct {
-            hkl_id = cur_r2peak[t as usize] as usize;
-            num_peak2r[hkl_id] += 1;
-            if_visit[hkl_id] = false;
+        idx = (hval + hmax) * klen_llen + (kval + kmax) * llen + (lval + lmax);
+        hkl_id = match hkl_map[idx as usize] {
+            x if x >= 0 => x as usize,
+            _ => continue,
+        };
+        let dx = rot_pix[0]
+            - (hval as f64) * rlatt_vec[0][0]
+            - (kval as f64) * rlatt_vec[0][1]
+            - (lval as f64) * rlatt_vec[0][2];
+        let dy = rot_pix[1]
+            - (hval as f64) * rlatt_vec[1][0]
+            - (kval as f64) * rlatt_vec[1][1]
+            - (lval as f64) * rlatt_vec[1][2];
+        let dz = rot_pix[2]
+            - (hval as f64) * rlatt_vec[2][0]
+            - (kval as f64) * rlatt_vec[2][1]
+            - (lval as f64) * rlatt_vec[2][2];
+
+        /* rot_pix is out of the view of its closet Bragg peak */
+        if dx * dx + dy * dy + dz * dz > tol {
+            continue;
         }
 
-        num_r2peak[r] = peak_ct;
-        r2peak[r] = vec![0; (1 + 3 * peak_ct) as usize];
-        alloc_r2p += (1 + 3 * peak_ct);
-        for t in 0..peak_ct {
-            idx = 3 * t + 1;
-            hkl_id = cur_r2peak[t as usize] as usize;
-            r2peak[r][idx as usize] = hkl_id as i32;
-            r2peak[r][(idx + 1) as usize] =
-                peak_r[hkl_id].row_min * num_col + peak_r[hkl_id].col_min;
-            r2peak[r][(idx + 2) as usize] =
-                peak_r[hkl_id].row_max * num_col + peak_r[hkl_id].col_max;
+        row_id = rec2pix_map[t] / num_col;
+        col_id = rec2pix_map[t] % num_col;
+        if if_visit[hkl_id] == false {
+            let mut cur_r2peak_locked = cur_r2peak.write().unwrap();
+            cur_r2peak_locked[peak_ct as usize] = hkl_id as i32;
+            drop(cur_r2peak_locked);
+            peak_ct += 1;
+            let mut peak_r_locked = match peak_r.write() {
+                Ok(res) => res,
+                Err(why) => return Err(format!("Error in peak_r_locked: {:?}", why).into()),
+            };
+            peak_r_locked[hkl_id] = _box {
+                row_min: row_id,
+                row_max: row_id,
+                col_min: col_id,
+                col_max: col_id,
+            };
+            drop(peak_r_locked);
+            if_visit[hkl_id] = true;
+        } else {
+            let mut peak_r_locked = peak_r.write().unwrap();
+            if peak_r_locked[hkl_id].row_min > row_id {
+                peak_r_locked[hkl_id].row_min = row_id;
+            }
+            if peak_r_locked[hkl_id].row_max < row_id {
+                peak_r_locked[hkl_id].row_max = row_id;
+            }
+            if peak_r_locked[hkl_id].col_min > col_id {
+                peak_r_locked[hkl_id].col_min = col_id;
+            }
+            if peak_r_locked[hkl_id].col_max < col_id {
+                peak_r_locked[hkl_id].col_max = col_id;
+            }
+            drop(peak_r_locked);
         }
-    
+    }
+    let cur_r2peak_locked = cur_r2peak.read().unwrap();
+    let mut num_peak2r_locked = num_peak2r.lock().unwrap();
+
+    for t in 0..peak_ct {
+        hkl_id = cur_r2peak_locked[t as usize] as usize;
+        num_peak2r_locked[hkl_id] += 1;
+        if_visit[hkl_id] = false;
+    }
+    let mut num_r2peak_locked = num_r2peak.lock().unwrap();
+    let mut r2peak_locked = r2peak.lock().unwrap();
+    num_r2peak_locked[r] = peak_ct;
+    r2peak_locked[r] = vec![0; (1 + 3 * peak_ct) as usize];
+    // alloc_r2p += 1 + 3 * peak_ct;
+    let peak_r_locked = peak_r.read().unwrap();
+    for t in 0..peak_ct {
+        idx = 3 * t + 1;
+        hkl_id = cur_r2peak_locked[t as usize] as usize;
+        r2peak_locked[r][idx as usize] = hkl_id as i32;
+        r2peak_locked[r][(idx + 1) as usize] =
+            peak_r_locked[hkl_id].row_min * num_col + peak_r_locked[hkl_id].col_min;
+        r2peak_locked[r][(idx + 2) as usize] =
+            peak_r_locked[hkl_id].row_max * num_col + peak_r_locked[hkl_id].col_max;
+    }
+    drop(cur_r2peak_locked);
+    drop(num_peak2r_locked);
+    drop(num_r2peak_locked);
+    drop(r2peak_locked);
 
     Ok(())
 }

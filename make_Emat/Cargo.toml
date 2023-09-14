@@ -12,3 +12,4 @@ rayon = "1.5.3"
 clap = { version = "3.2.19", features = ["derive"] }
 hdf5 = "0.8.1"
 ndarray = "0.15.6"
+indicatif = "0.17.2"

@@ -1,6 +1,6 @@
 /*
 exhaustive search for the compatible orientations of the
-identified peaks using one-sided communication in MPI
+identified peaks using Rayon
 
 
 needs:
